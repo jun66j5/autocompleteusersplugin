@@ -10,6 +10,7 @@ from trac.config import ListOption
 from trac.core import Component, implements
 from trac.ticket.model import _fixup_cc_list
 from trac.ticket.web_ui import TicketModule
+from trac.util.presentation import to_json
 from trac.util.text import obfuscate_email_address
 from trac.web.api import IRequestFilter, IRequestHandler
 from trac.web.chrome import Chrome, ITemplateProvider
@@ -48,17 +49,20 @@ class AutocompleteUsers(Component):
         subjects = []
         if req.args.get('users', '1') == '1':
             users = self._get_users(req)
-            subjects = ['%s|%s|%s' % (user[USER],
-                                      user[EMAIL] and '<%s> ' % user[EMAIL] or '',
-                                      user[NAME])
+            subjects = [(user[USER],
+                         user[EMAIL] and '<%s> ' % user[EMAIL] or '',
+                         user[NAME])
                         for value, user in users]  # value unused (placeholder needed for sorting)
 
         if req.args.get('groups'):
             groups = self._get_groups(req)
             if groups:
-                subjects.extend(['%s||group' % group for group in groups])
+                subjects.extend((group, '', 'group') for group in groups)
 
-        req.send('\n'.join(subjects).encode('utf-8'), 'text/plain')
+        content = to_json(subjects)
+        if isinstance(content, unicode):
+            content = content.encode('utf-8')
+        req.send(content, 'application/json')
 
     # ITemplateProvider methods
 
@@ -88,27 +92,16 @@ class AutocompleteUsers(Component):
 
     def post_process_request(self, req, template, data, content_type):
         if template in ('ticket.html', 'admin_perms.html', 'query.html'):
-            add_stylesheet(req, 'autocomplete/css/autocomplete.css')
-            add_script(req, 'autocomplete/js/autocomplete.js')
-            add_script(req, 'autocomplete/js/format_item.js')
-
+            Chrome(self.env).add_jquery_ui(req)
+            add_stylesheet(req, 'autocomplete/css/autocompleteusers.css')
+            add_script(req, 'autocomplete/js/autocompleteusers.js')
             script_data = {
-                SCRIPT_FIELD_NAME:
-                    self.config.getlist(SECTION_NAME, FIELDS_OPTION[0]),
-                SCRIPT_FIELD_NAME + '_multi':
-                    self.config.getlist(SECTION_NAME, FIELDS_OPTION[1]),
-                'subjects_href': req.href.subjects(),
+                'template': template,
+                'fields': self.complete_fields,
+                'multi_fields': self.multi_complete_fields,
+                'url': req.href.subjects(),
             }
-
-            if template == 'ticket.html':
-                add_script(req, 'autocomplete/js/autocomplete_ticket.js')
-            elif template == 'admin_perms.html':
-                add_script(req, 'autocomplete/js/autocomplete_perms.js')
-            elif template == 'query.html':
-                add_script(req, 'autocomplete/js/autocomplete_query.js')
-
-            add_script_data(req, script_data)
-
+            add_script_data(req, {'autocompleteusers': script_data})
         return template, data, content_type
 
     # Private methods
@@ -118,7 +111,7 @@ class AutocompleteUsers(Component):
         # from the list of all subjects. This has the caveat of also
         # returning users without session data, but there currently seems
         # to be no other way to handle this.
-        query = req.args.get('q', '').lower()
+        query = req.args.get('term', '').lower()
         db = self.env.get_read_db()
         cursor = db.cursor()
         cursor.execute("SELECT DISTINCT username FROM permission")
@@ -135,7 +128,7 @@ class AutocompleteUsers(Component):
         # owners.sort()
         # see: http://trac.edgewall.org/browser/trunk/trac/ticket/default_workflow.py#L232
 
-        query = req.args.get('q', '').lower()
+        query = req.args.get('term', '').lower()
 
         # user names, email addresses, full names
         can_view = Chrome(self.env).show_email_addresses or \
